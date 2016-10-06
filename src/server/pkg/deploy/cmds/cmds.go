@@ -86,7 +86,8 @@ func DeployCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVarP(&shards, "shards", "s", 32, "The static number of shards for pfs.")
 	cmd.Flags().StringVarP(&hostPath, "host-path", "p", "/tmp/pach", "the path on the host machine where data will be stored; this is only relevant if you are running pachyderm locally.")
-	cmd.Flags().BoolVarP(&dev, "dev", "d", false, "Don't use a specific version of pachyderm/pachd.")
+	cmd.Flags().BoolVarP(&dev, "dev", "d", false, "Use pachyderm/{pachd,job-shim}:local as the pachyderm and pachd images.")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "", false, "Don't actually deploy pachyderm to Kubernetes, instead just print the manifest.")
+	cmd.Flags().StringVar(&pachdImage, "pachd-image", "pachyderm/pachd
 	return cmd
 }

@@ -411,3 +411,71 @@ func TestScraper(t *testing.T) {
 	require.NoError(t, c.GetFile("scraper", commitInfos[0].Commit.ID, "/www.google.com/robots.txt", 0, 0, "", false, &pfsclient.Shard{}, b))
 	require.True(t, b.Len() > 10)
 }
+
+func TestOpenCV(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration tests in short mode")
+	}
+	c := getPachClient(t)
+
+	// create "images" repo and check that it exists
+	cmd := exec.Command("pachctl", "create-repo", "images")
+	require.NoError(t, cmd.Run())
+	pfsRepos, err := c.ListRepo([]string{})
+	require.NoError(t, err)
+	require.EqualOneOf(t, toRepoNames(pfsRepos), "images")
+
+	// Download images into repo
+	output, err := exec.Command("pachctl", "put-file", "images", "master", "-c", "-f").Output()
+	require.NoError(t, err)
+	require.Equal(t, "master/0\n", string(output))
+	// Check that it's there
+	var commitInfos []*pfsclient.CommitInfo
+	commitInfos, err = c.ListCommit(
+		// fromCommits (only use commits to the 'urls' repo)
+		[]*pfsclient.Commit{{
+			Repo: &pfsclient.Repo{"urls"},
+		}},
+		nil, // provenance (any provenance)
+		client.CommitTypeWrite, // Commit hasn't finished, so we want "write"
+		pfsclient.CommitStatus_NORMAL,
+		true)
+	require.NoError(t, err)
+	require.Equal(t, 1, len(commitInfos))
+	require.Equal(t, "urls", commitInfos[0].Commit.Repo.Name)
+	require.Equal(t, "master/0", commitInfos[0].Commit.ID)
+
+	// Example input takes ~10 minutes to scrape, so just use two URLs here
+	cmd = exec.Command("pachctl", "put-file", "urls", "master/0", "urls")
+	cmd.Stdin = bytes.NewBuffer([]byte("www.google.com\nwww.example.com\n"))
+	require.NoError(t, cmd.Run())
+
+	// finish commit
+	require.NoError(t, exec.Command("pachctl", "finish-commit", "urls", "master/0").Run())
+	b := &bytes.Buffer{}
+	require.NoError(t, c.GetFile("urls", "master/0", "urls", 0, 0, "", false, &pfsclient.Shard{}, b))
+	require.Equal(t, "www.google.com\nwww.example.com\n", b.String())
+
+	// Create pipeline
+	cmd = exec.Command("pachctl", "create-pipeline", "-f", "-")
+	cmd.Stdin, err = os.Open("../../../doc/examples/scraper/scraper.json")
+	require.NoError(t, err)
+	require.NoError(t, cmd.Run())
+	_, err = c.FlushCommit([]*pfsclient.Commit{commitInfos[0].Commit}, nil) // Wait until the URLs have been scraped
+	require.NoError(t, err)
+
+	commitInfos, err = c.ListCommit(
+		// fromCommits (use only commits to the 'scraper' repo)
+		[]*pfsclient.Commit{{
+			Repo: &pfsclient.Repo{"scraper"},
+		}},
+		nil,
+		client.CommitTypeRead,
+		pfsclient.CommitStatus_NORMAL,
+		true)
+	require.Equal(t, 1, len(commitInfos))
+	require.Equal(t, "scraper", commitInfos[0].Commit.Repo.Name)
+	b = &bytes.Buffer{}
+	require.NoError(t, c.GetFile("scraper", commitInfos[0].Commit.ID, "/www.google.com/robots.txt", 0, 0, "", false, &pfsclient.Shard{}, b))
+	require.True(t, b.Len() > 10)
+}

@@ -43,6 +43,80 @@ const (
 	microsoftBackend
 )
 
+func (b backend) String() string {
+	switch b {
+	case localBackend:
+		return "Local"
+	case amazonBackend:
+		return "Amazon"
+	case googleBackend:
+		return "Google"
+	}
+}
+
+type GoogleManifestOptions struct {
+	bucket     string
+	volumeName string
+	volumeSize int
+	// version    string -- replaced by ManifestOptions.image
+}
+
+type AmazonManifestOptions struct {
+	bucket     string
+	volumeName string
+	volumeSize int
+	id         string
+	secret     string
+	token      string
+	region     string
+	// version    string -- replaced by ManifestOptions.image
+}
+
+type LocalManifestOptions struct {
+	hostPath string
+}
+
+type ManifestOptions struct {
+	shards  uint64
+	image   string
+	backend backend
+
+	// Exactly one of the following will be non-nil
+	localOptions  *LocalManifestOptions
+	googleOptions *GoogleManifestOptions
+	amazonOptions *AmazonManifestOptions
+}
+
+func (o *ManifestOptions) GetBucket(string, error) {
+	if o.backend == googleBackend {
+		return o.googleOptions.bucket
+	} else if o.backend == amazonBackend {
+		return o.amazonOptions.bucket
+	} else {
+		return "", fmt.Errorf("Bucket not defined for backend \"" + b.String() + "\"")
+	}
+}
+
+func (o *ManifestOptions) GetVolumeName(string, error) {
+	if o.backend == googleBackend {
+		return o.googleOptions.volumeName
+	} else if o.backend == amazonBackend {
+		return o.amazonOptions.volumeName
+	} else {
+		return "", fmt.Errorf("Bucket not defined for backend \"" + b.String() + "\"")
+	}
+}
+
+func (o *ManifestOptions) GetVolumeSize(string, error) {
+	if o.backend == googleBackend {
+		return o.googleOptions.volumeSize
+	} else if o.backend == amazonBackend {
+		return o.amazonOptions.volumeSize
+	} else {
+		return "", fmt.Errorf("Bucket not defined for backend \"" + b.String() + "\"")
+	}
+}
+
 // ServiceAccount returns a kubernetes service account for use with Pachyderm.
 func ServiceAccount() *api.ServiceAccount {
 	return &api.ServiceAccount{
@@ -654,15 +728,14 @@ func RethinkVolumeClaim(size int) *api.PersistentVolumeClaim {
 }
 
 // WriteAssets creates the assets in a dir. It expects dir to already exist.
-func WriteAssets(w io.Writer, shards uint64, backend backend,
-	volumeName string, volumeSize int, hostPath string, version string) {
+func WriteAssets(w io.Writer, options ManifestOptions) {
 	encoder := codec.NewEncoder(w, &codec.JsonHandle{Indent: 2})
 
 	ServiceAccount().CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
 
-	if backend != localBackend && volumeName != "" {
-		RethinkVolume(backend, volumeName, volumeSize).CodecEncodeSelf(encoder)
+	if options.backend != localBackend {
+		RethinkVolume(options.backend, options.GetVolumeName(), options.GetVolumeSize()).CodecEncodeSelf(encoder)
 		fmt.Fprintf(w, "\n")
 		RethinkVolumeClaim(volumeSize).CodecEncodeSelf(encoder)
 		fmt.Fprintf(w, "\n")
