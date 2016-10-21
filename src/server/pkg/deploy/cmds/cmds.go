@@ -22,6 +22,8 @@ func DeployCmd() *cobra.Command {
 	var hostPath string
 	var dev bool
 	var dryRun bool
+	var dockerRegistry string
+	var version string
 	cmd := &cobra.Command{
 		Use:   "deploy [amazon bucket id secret token region volume-name volume-size-in-GB | google bucket volume-name volume-size-in-GB | microsoft container storage-account-name storage-account-key]",
 		Short: "Print a kubernetes manifest for a Pachyderm cluster.",
@@ -88,6 +90,7 @@ func DeployCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&hostPath, "host-path", "p", "/tmp/pach", "the path on the host machine where data will be stored; this is only relevant if you are running pachyderm locally.")
 	cmd.Flags().BoolVarP(&dev, "dev", "d", false, "Use pachyderm/{pachd,job-shim}:local as the pachyderm and pachd images.")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "", false, "Don't actually deploy pachyderm to Kubernetes, instead just print the manifest.")
-	cmd.Flags().StringVar(&pachdImage, "pachd-image", "pachyderm/pachd
+	cmd.Flags().StringVar(&dockerRegistry, "docker-registry", "pachyderm", "---")
+	cmd.Flags().StringVar(&version, "version", "1.2.2", "---")
 	return cmd
 }

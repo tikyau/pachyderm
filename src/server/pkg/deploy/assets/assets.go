@@ -18,7 +18,9 @@ import (
 var (
 	suite                  = "pachyderm"
 	volumeSuite            = "pachyderm-pps-storage"
-	pachdImage             = "pachyderm/pachd"
+	pachdImageName         = "pachd"
+	jobShimImageName       = "job-shim"
+	pachydermRegistry      = "pachyderm"
 	etcdImage              = "gcr.io/google_containers/etcd:2.0.12"
 	rethinkImage           = "rethinkdb:2.3.3"
 	serviceAccountName     = "pachyderm"
@@ -51,9 +53,14 @@ func (b backend) String() string {
 		return "Amazon"
 	case googleBackend:
 		return "Google"
+	case microsoftBackend:
+		return "Microsoft"
+	default:
+		return "Unknown backend " + strconv.Itoa(int(b))
 	}
 }
 
+// K8s options for Google pach cluster
 type GoogleManifestOptions struct {
 	bucket     string
 	volumeName string
@@ -61,6 +68,7 @@ type GoogleManifestOptions struct {
 	// version    string -- replaced by ManifestOptions.image
 }
 
+// K8s options for Amazon pach cluster
 type AmazonManifestOptions struct {
 	bucket     string
 	volumeName string
@@ -72,48 +80,62 @@ type AmazonManifestOptions struct {
 	// version    string -- replaced by ManifestOptions.image
 }
 
+// K8s options for Microsoft pach cluster
+type MicrosoftManifestOptions struct {
+	container string
+	id        string
+	secret    string
+}
+
+// K8s options for local pach cluster (no persistent storage or block store)
 type LocalManifestOptions struct {
 	hostPath string
 }
 
 type ManifestOptions struct {
-	shards  uint64
-	image   string
+	shards   uint64
+	registry string
+	version  string
+
+	// The backend being used
 	backend backend
-
-	// Exactly one of the following will be non-nil
-	localOptions  *LocalManifestOptions
-	googleOptions *GoogleManifestOptions
-	amazonOptions *AmazonManifestOptions
+	// Exactly one of the following must be non-nil
+	localOptions     *LocalManifestOptions
+	googleOptions    *GoogleManifestOptions
+	amazonOptions    *AmazonManifestOptions
+	microsoftOptions *MicrosoftManifestOptions
 }
 
-func (o *ManifestOptions) GetBucket(string, error) {
-	if o.backend == googleBackend {
-		return o.googleOptions.bucket
-	} else if o.backend == amazonBackend {
-		return o.amazonOptions.bucket
-	} else {
-		return "", fmt.Errorf("Bucket not defined for backend \"" + b.String() + "\"")
+func (o *ManifestOptions) GetBucket() (string, error) {
+	switch o.backend {
+	case googleBackend:
+		return o.googleOptions.bucket, nil
+	case amazonBackend:
+		return o.amazonOptions.bucket, nil
+	default:
+		return "", fmt.Errorf("Bucket not defined for backend \"" + o.backend.String() + "\"")
 	}
 }
 
-func (o *ManifestOptions) GetVolumeName(string, error) {
-	if o.backend == googleBackend {
-		return o.googleOptions.volumeName
-	} else if o.backend == amazonBackend {
-		return o.amazonOptions.volumeName
-	} else {
-		return "", fmt.Errorf("Bucket not defined for backend \"" + b.String() + "\"")
+func (o *ManifestOptions) GetVolumeName() (string, error) {
+	switch o.backend {
+	case googleBackend:
+		return o.googleOptions.volumeName, nil
+	case amazonBackend:
+		return o.amazonOptions.volumeName, nil
+	default:
+		return "", fmt.Errorf("VolumeName not defined for backend \"" + o.backend.String() + "\"")
 	}
 }
 
-func (o *ManifestOptions) GetVolumeSize(string, error) {
-	if o.backend == googleBackend {
-		return o.googleOptions.volumeSize
-	} else if o.backend == amazonBackend {
-		return o.amazonOptions.volumeSize
-	} else {
-		return "", fmt.Errorf("Bucket not defined for backend \"" + b.String() + "\"")
+func (o *ManifestOptions) GetVolumeSize() (int, error) {
+	switch o.backend {
+	case googleBackend:
+		return o.googleOptions.volumeSize, nil
+	case amazonBackend:
+		return o.amazonOptions.volumeSize, nil
+	default:
+		return -1, fmt.Errorf("VolumeSize not defined for backend \"" + o.backend.String() + "\"")
 	}
 }
 
@@ -132,15 +154,21 @@ func ServiceAccount() *api.ServiceAccount {
 }
 
 // PachdRc returns a pachd replication controller.
-func PachdRc(shards uint64, backend backend, hostPath string, version string) *api.ReplicationController {
-	image := pachdImage
-	if version != "" {
-		image += ":" + version
+// func PachdRc(shards uint64, backend backend, hostPath string, version string) *api.ReplicationController {
+func PachdRc(opts ManifestOptions) *api.ReplicationController {
+	tagSuffix := ""
+	if opts.version != "" {
+		tagSuffix = fmt.Sprintf(":%s", opts.version)
 	}
-	// we turn metrics on only if we have a static version this prevents dev
-	// clusters from reporting metrics
+	registry := pachydermRegistry
+	if opts.registry != "" {
+		registry = opts.registry
+	}
+	pachdImage := fmt.Sprintf("%s/%s%s", registry, pachdImageName, tagSuffix)
+	jobShimImage := fmt.Sprintf("%s/%s%s", registry, jobShimImageName, tagSuffix)
+	// we turn metrics on only if we have a static version, to prevent dev clusters from reporting metrics
 	metrics := "true"
-	if version == deploy.DevVersionTag {
+	if opts.version == deploy.DevVersionTag {
 		metrics = "false"
 	}
 	volumes := []api.Volume{
@@ -167,10 +195,10 @@ func PachdRc(shards uint64, backend backend, hostPath string, version string) *a
 		TimeoutSeconds:      1,
 	}
 	var backendEnvVar string
-	switch backend {
+	switch opts.backend {
 	case localBackend:
 		volumes[0].HostPath = &api.HostPathVolumeSource{
-			Path: filepath.Join(hostPath, "pachd"),
+			Path: filepath.Join(opts.localOptions.hostPath, "pachd"),
 		}
 	case amazonBackend:
 		backendEnvVar = server.AmazonBackendEnvVar
@@ -239,7 +267,7 @@ func PachdRc(shards uint64, backend backend, hostPath string, version string) *a
 					Containers: []api.Container{
 						{
 							Name:  pachdName,
-							Image: image,
+							Image: pachdImage,
 							Env: []api.EnvVar{
 								{
 									Name:  "PACH_ROOT",
@@ -247,7 +275,7 @@ func PachdRc(shards uint64, backend backend, hostPath string, version string) *a
 								},
 								{
 									Name:  "NUM_SHARDS",
-									Value: strconv.FormatUint(shards, 10),
+									Value: strconv.FormatUint(opts.shards, 10),
 								},
 								{
 									Name:  "STORAGE_BACKEND",
@@ -264,7 +292,7 @@ func PachdRc(shards uint64, backend backend, hostPath string, version string) *a
 								},
 								{
 									Name:  "JOB_SHIM_IMAGE",
-									Value: fmt.Sprintf("pachyderm/job-shim:%s", version),
+									Value: fmt.Sprintf(jobShimImage),
 								},
 								{
 									Name:  "JOB_IMAGE_PULL_POLICY",
@@ -272,7 +300,7 @@ func PachdRc(shards uint64, backend backend, hostPath string, version string) *a
 								},
 								{
 									Name:  "PACHD_VERSION",
-									Value: version,
+									Value: opts.version,
 								},
 								{
 									Name:  "METRICS",
@@ -339,7 +367,11 @@ func PachdService() *api.Service {
 }
 
 // EtcdRc returns an etcd replication controller.
-func EtcdRc(hostPath string) *api.ReplicationController {
+func EtcdRc(opts ManifestOptions) *api.ReplicationController {
+	hostPath := ""
+	if opts.backend == localBackend {
+		hostPath = opts.localOptions.hostPath
+	}
 	replicas := int32(1)
 	return &api.ReplicationController{
 		TypeMeta: unversioned.TypeMeta{
@@ -436,7 +468,7 @@ func EtcdService() *api.Service {
 }
 
 // RethinkRc returns a rethinkdb replication controller.
-func RethinkRc(backend backend, volume string, hostPath string) *api.ReplicationController {
+func RethinkRc(opts ManifestOptions) *api.ReplicationController {
 	replicas := int32(1)
 	spec := &api.ReplicationController{
 		TypeMeta: unversioned.TypeMeta{
@@ -497,11 +529,21 @@ func RethinkRc(backend backend, volume string, hostPath string) *api.Replication
 		},
 	}
 
-	if backend != localBackend && volume != "" {
-		spec.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim = &api.PersistentVolumeClaimVolumeSource{
-			ClaimName: rethinkVolumeClaimName,
+	if opts.backend != localBackend {
+		volumeName, err := opts.GetVolumeName()
+		if err != nil {
+			panic(fmt.Sprintf("Malformed Manifest options produced error %s", err.Error()))
 		}
-	} else if backend == localBackend || backend == microsoftBackend {
+		if volumeName != "" {
+			spec.Spec.Template.Spec.Volumes[0].PersistentVolumeClaim = &api.PersistentVolumeClaimVolumeSource{
+				ClaimName: rethinkVolumeClaimName,
+			}
+		}
+	} else if opts.backend == localBackend || opts.backend == microsoftBackend {
+		hostPath := ""
+		if opts.backend == localBackend {
+			hostPath = opts.localOptions.hostPath
+		}
 		// ToDo: workaround until https://github.com/pachyderm/pachyderm/issues/960
 		spec.Spec.Template.Spec.Volumes[0].HostPath = &api.HostPathVolumeSource{
 			Path: filepath.Join(hostPath, "rethink"),
@@ -549,11 +591,16 @@ func RethinkService() *api.Service {
 }
 
 // InitJob returns a pachd-init job.
-func InitJob(version string) *extensions.Job {
-	image := pachdImage
-	if version != "" {
-		image += ":" + version
+func InitJob(opts ManifestOptions) *extensions.Job {
+	pachdImage := pachdImageName
+	if opts.version != "" {
+		pachdImage += ":" + opts.version
 	}
+	registry := pachydermRegistry
+	if opts.registry != "" {
+		registry = opts.registry
+	}
+	pachdImage = fmt.Sprintf("%s/%s", registry, pachdImage)
 	return &extensions.Job{
 		TypeMeta: unversioned.TypeMeta{
 			Kind:       "Job",
@@ -576,7 +623,7 @@ func InitJob(version string) *extensions.Job {
 					Containers: []api.Container{
 						{
 							Name:  initName,
-							Image: image,
+							Image: pachdImage,
 							Env: []api.EnvVar{
 								{
 									Name:  "PACH_ROOT",
@@ -728,47 +775,85 @@ func RethinkVolumeClaim(size int) *api.PersistentVolumeClaim {
 }
 
 // WriteAssets creates the assets in a dir. It expects dir to already exist.
-func WriteAssets(w io.Writer, options ManifestOptions) {
+/*** old signature:
+/*** WriteAssets(writer, shards uint64, backend backend, volumeName string, volumeSize int, hostPath string, version string) {
+*/
+func WriteAssets(w io.Writer, opts ManifestOptions) error {
 	encoder := codec.NewEncoder(w, &codec.JsonHandle{Indent: 2})
 
 	ServiceAccount().CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
 
-	if options.backend != localBackend {
-		RethinkVolume(options.backend, options.GetVolumeName(), options.GetVolumeSize()).CodecEncodeSelf(encoder)
+	if opts.backend != localBackend {
+		volumeName, err := opts.GetVolumeName()
+		if err != nil {
+			return err
+		}
+		volumeSize, err := opts.GetVolumeSize()
+		if err != nil {
+			return err
+		}
+		RethinkVolume(opts.backend, volumeName, volumeSize).CodecEncodeSelf(encoder)
 		fmt.Fprintf(w, "\n")
 		RethinkVolumeClaim(volumeSize).CodecEncodeSelf(encoder)
 		fmt.Fprintf(w, "\n")
 	}
 
-	EtcdRc(hostPath).CodecEncodeSelf(encoder)
+	EtcdRc(opts).CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
 	EtcdService().CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
 
 	RethinkService().CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
-	RethinkRc(backend, volumeName, hostPath).CodecEncodeSelf(encoder)
+	RethinkRc(opts).CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
 
-	InitJob(version).CodecEncodeSelf(encoder)
+	InitJob(opts).CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
 
 	PachdService().CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
-	PachdRc(shards, backend, hostPath, version).CodecEncodeSelf(encoder)
+	PachdRc(opts).CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
+	return nil
 }
 
 // WriteLocalAssets writes assets to a local backend.
 func WriteLocalAssets(w io.Writer, shards uint64, hostPath string, version string) {
-	WriteAssets(w, shards, localBackend, "", 0, hostPath, version)
+	opts := ManifestOptions{
+		shards:   shards,
+		registry: "pachyderm",
+		version:  "1.2.2",
+
+		backend: localBackend,
+		localOptions: &LocalManifestOptions{
+			hostPath: hostPath,
+		},
+	}
+	WriteAssets(w, opts)
 }
 
 // WriteAmazonAssets writes assets to an amazon backend.
 func WriteAmazonAssets(w io.Writer, shards uint64, bucket string, id string, secret string, token string,
 	region string, volumeName string, volumeSize int, version string) {
-	WriteAssets(w, shards, amazonBackend, volumeName, volumeSize, "", version)
+	opts := ManifestOptions{
+		shards:   shards,
+		registry: "pachyderm",
+		version:  "1.2.2",
+
+		backend: amazonBackend,
+		amazonOptions: &AmazonManifestOptions{
+			bucket:     bucket,
+			volumeName: volumeName,
+			volumeSize: volumeSize,
+			id:         id,
+			secret:     secret,
+			token:      token,
+			region:     region,
+		},
+	}
+	WriteAssets(w, opts)
 	encoder := codec.NewEncoder(w, &codec.JsonHandle{Indent: 2})
 	AmazonSecret(bucket, id, secret, token, region).CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
@@ -777,7 +862,19 @@ func WriteAmazonAssets(w io.Writer, shards uint64, bucket string, id string, sec
 // WriteGoogleAssets writes assets to a google backend.
 func WriteGoogleAssets(w io.Writer, shards uint64, bucket string,
 	volumeName string, volumeSize int, version string) {
-	WriteAssets(w, shards, googleBackend, volumeName, volumeSize, "", version)
+	opts := ManifestOptions{
+		shards:   shards,
+		registry: "pachyderm",
+		version:  "1.2.2",
+
+		backend: googleBackend,
+		googleOptions: &GoogleManifestOptions{
+			bucket:     bucket,
+			volumeName: volumeName,
+			volumeSize: volumeSize,
+		},
+	}
+	WriteAssets(w, opts)
 	encoder := codec.NewEncoder(w, &codec.JsonHandle{Indent: 2})
 	GoogleSecret(bucket).CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
@@ -786,7 +883,19 @@ func WriteGoogleAssets(w io.Writer, shards uint64, bucket string,
 // WriteMicrosoftAssets writes assets to a microsoft backend
 func WriteMicrosoftAssets(w io.Writer, shards uint64, container string, id string, secret string,
 	volumeURI string, volumeSize int, version string) {
-	WriteAssets(w, shards, microsoftBackend, volumeURI, volumeSize, "", version)
+	opts := ManifestOptions{
+		shards:   shards,
+		registry: "pachyderm",
+		version:  "1.2.2",
+
+		backend: microsoftBackend,
+		microsoftOptions: &MicrosoftManifestOptions{
+			container: container,
+			id:        id,
+			secret:    secret,
+		},
+	}
+	WriteAssets(w, opts)
 	encoder := codec.NewEncoder(w, &codec.JsonHandle{Indent: 2})
 	MicrosoftSecret(container, id, secret).CodecEncodeSelf(encoder)
 	fmt.Fprintf(w, "\n")
