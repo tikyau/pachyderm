@@ -23,15 +23,15 @@ func DeployCmd() *cobra.Command {
 	var dev bool
 	var dryRun bool
 	var dockerRegistry string
-	var version string
+	var imageTag string
 	cmd := &cobra.Command{
 		Use:   "deploy [amazon bucket id secret token region volume-name volume-size-in-GB | google bucket volume-name volume-size-in-GB | microsoft container storage-account-name storage-account-key]",
 		Short: "Print a kubernetes manifest for a Pachyderm cluster.",
 		Long:  "Print a kubernetes manifest for a Pachyderm cluster.",
 		Run: pkgcobra.RunBoundedArgs(pkgcobra.Bounds{Min: 0, Max: 8}, func(args []string) error {
-			version := version.PrettyPrintVersion(version.Version)
+			imageTag := version.PrettyPrintVersion(version.Version)
 			if dev {
-				version = deploy.DevVersionTag
+				imageTag = deploy.DevVersionTag
 			}
 			var out io.Writer
 			var manifest bytes.Buffer
@@ -40,7 +40,7 @@ func DeployCmd() *cobra.Command {
 				out = os.Stdout
 			}
 			if len(args) == 0 {
-				assets.WriteLocalAssets(out, uint64(shards), hostPath, version)
+				assets.WriteLocalAssets(out, uint64(shards), hostPath, imageTag)
 			} else {
 				switch args[0] {
 				case "amazon":
@@ -53,7 +53,7 @@ func DeployCmd() *cobra.Command {
 						return fmt.Errorf("volume size needs to be an integer; instead got %v", args[7])
 					}
 					assets.WriteAmazonAssets(out, uint64(shards), args[1], args[2], args[3], args[4],
-						args[5], volumeName, volumeSize, version)
+						args[5], volumeName, volumeSize, imageTag)
 				case "google":
 					if len(args) != 4 {
 						return fmt.Errorf("expected 4 args, got %d", len(args))
@@ -63,7 +63,7 @@ func DeployCmd() *cobra.Command {
 					if err != nil {
 						return fmt.Errorf("volume size needs to be an integer; instead got %v", args[3])
 					}
-					assets.WriteGoogleAssets(out, uint64(shards), args[1], volumeName, volumeSize, version)
+					assets.WriteGoogleAssets(out, uint64(shards), args[1], volumeName, volumeSize, imageTag)
 				case "microsoft":
 					if len(args) != 4 {
 						return fmt.Errorf("expected 4 args, got %d", len(args))
@@ -72,7 +72,7 @@ func DeployCmd() *cobra.Command {
 					if err != nil {
 						return fmt.Errorf("storage-account-key needs to be base64 encoded; instead got '%v'", args[3])
 					}
-					assets.WriteMicrosoftAssets(out, uint64(shards), args[1], args[2], args[3], "", 0, version)
+					assets.WriteMicrosoftAssets(out, uint64(shards), args[1], args[2], args[3], "", 0, imageTag)
 				}
 			}
 			if !dryRun {
@@ -90,7 +90,7 @@ func DeployCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&hostPath, "host-path", "p", "/tmp/pach", "the path on the host machine where data will be stored; this is only relevant if you are running pachyderm locally.")
 	cmd.Flags().BoolVarP(&dev, "dev", "d", false, "Use pachyderm/{pachd,job-shim}:local as the pachyderm and pachd images.")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "", false, "Don't actually deploy pachyderm to Kubernetes, instead just print the manifest.")
-	cmd.Flags().StringVar(&dockerRegistry, "docker-registry", "pachyderm", "---")
-	cmd.Flags().StringVar(&version, "version", "1.2.2", "---")
+	cmd.Flags().StringVar(&dockerRegistry, "docker-registry", "pachyderm", "The docker registry prefix to use when fetching the 'pachd' and 'job-shim' images. Default is 'pachyderm' (for the dockerhub image 'pachyderm/pachd')")
+	cmd.Flags().StringVar(&imageTag, "image-tag", "1.2.2", "The image tag to use when fetching the 'pachd' and 'job-shim' images. For example, --image-tag=1.2.1 would fetch 'pachyderm/pachd:1.2.1'")
 	return cmd
 }
