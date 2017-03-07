@@ -4475,28 +4475,31 @@ func TestWorkerResourceRequest(t *testing.T) {
 	t.Parallel()
 
 	c := getPachClient(t)
-	// create repos
+	// Create repos
 	dataRepo := uniqueString("TestWorkerResourceRequest")
 	pipelineName := uniqueString("TestWorkerResourceRequest_Pipeline")
 	require.NoError(t, c.CreateRepo(dataRepo))
-	_, err := c.PpsAPIClient.CreatePipeline(
-		context.Background(),
-		&ppsclient.CreatePipelineRequest{
-			Pipeline: client.NewPipeline(pipelineName),
-			Transform: &ppsclient.Transform{
-				Cmd: []string{"cp", path.Join("/pfs", dataRepo, "file"), "/pfs/out/file"},
-			},
-			ParallelismSpec: &ppsclient.ParallelismSpec{
-				Strategy: ppsclient.ParallelismSpec_CONSTANT,
-				Constant: 1,
-			},
-			Inputs: []*ppsclient.PipelineInput{{Repo: &pfsclient.Repo{Name: dataRepo}}},
-			GcPolicy: &ppsclient.GCPolicy{
-				Success: types.DurationProto(time.Second),
-				Failure: types.DurationProto(time.Second),
-			},
-		})
+
+	// Create pipeline
+	pipeline := &ppsclient.CreatePipelineRequest{
+		Pipeline: client.NewPipeline(pipelineName),
+		Transform: &ppsclient.Transform{
+			Cmd: []string{"cp", path.Join("/pfs", dataRepo, "file"), "/pfs/out/file"},
+		},
+		ParallelismSpec: &ppsclient.ParallelismSpec{
+			Strategy: ppsclient.ParallelismSpec_CONSTANT,
+			Constant: 1,
+		},
+		Inputs: []*ppsclient.PipelineInput{{Repo: &pfsclient.Repo{Name: dataRepo}}},
+		GcPolicy: &ppsclient.GCPolicy{
+			Success: types.DurationProto(time.Second),
+			Failure: types.DurationProto(time.Second),
+		},
+	}
+	_, err := c.PpsAPIClient.CreatePipeline(context.Background(), pipeline)
 	require.NoError(t, err)
+
+	// Put data in the repo
 	commit, err := c.StartCommit(dataRepo, "master")
 	require.NoError(t, err)
 	_, err = c.PutFile(dataRepo, commit.ID, "file", strings.NewReader("foo\n"))
@@ -4505,37 +4508,86 @@ func TestWorkerResourceRequest(t *testing.T) {
 	_, err = c.FlushCommit([]*pfsclient.Commit{commit}, nil)
 	require.NoError(t, err)
 
-	// Get jobInfos from pachyderm so we can find the job pods with the k8s client
-	jobInfos, err := c.ListJob(pipelineName, nil)
-	require.NoError(t, err)
-	require.Equal(t, 1, len(jobInfos))
-
-	// Get info about the job pods from k8s & check for resources
-	kubeClient := getKubeClient(t)
-	retries := 10
-	for i := 0; i < retries; i++ {
-		podList, err := kubeClient.Pods(api.NamespaceDefault).List(api.ListOptions{
-			LabelSelector: labels.SelectorFromSet(
-				map[string]string{"app": jobInfos[0].Job.ID}),
-		})
-		// TODO(msteffen): Is there a more robust way to do this? We want to query
-		// kubernetes after the job is created and before the job is deleted.
+	// Get jobInfo from pachyderm so we can find the job pods with the k8s client
+	var jobInfo *ppsclient.JobInfo
+	b := backoff.NewExponentialBackOff()
+	b.MaxElapsedTime = 10 * time.Second
+	backoff.Retry(func() error {
+		jobInfos, err := c.ListJob(pipelineName, nil)
 		if err != nil {
-			time.Sleep(500 * time.Millisecond)
-			continue // retry
+			return err
 		}
-		for _, p := range podList.Items {
-			for _, container := range p.Spec.Containers {
-				// Make sure a CPU and Memory request are both set
-				_, ok := container.Resources.Requests[api.ResourceCPU]
-				require.True(t, ok)
-				_, ok = container.Resources.Requests[api.ResourceMemory]
-				require.True(t, ok)
-			}
+		if len(jobInfos) < 1 {
+			return fmt.Errorf("no JobInfos yet")
+		} else if len(jobInfos) > 1 {
+			return fmt.Errorf("too many JobInfos")
+		} else {
+			jobInfo = jobInfos[0]
+			return nil
 		}
-		break // no more retries needed
-	}
+	}, b)
+
+	// Get info about the job pods from k8s & check for default resources
+	kubeClient := getKubeClient(t)
+	podList, err := kubeClient.Pods(api.NamespaceDefault).List(api.ListOptions{
+		LabelSelector: labels.SelectorFromSet(
+			map[string]string{"app": jobInfo.Job.ID}),
+	})
 	require.NoError(t, err)
+	for _, p := range podList.Items {
+		for _, container := range p.Spec.Containers {
+			_, ok := container.Resources.Requests[api.ResourceCPU]
+			require.True(t, ok)
+			_, ok = container.Resources.Requests[api.ResourceMemory]
+			require.True(t, ok)
+		}
+	}
+
+	// Create a second pipeline with resources explicitly specified, and make sure
+	// they're propagated to the job
+	pipelineName = uniqueString("TestWorkerResourceRequest_Pipeline")
+	pipeline.Pipeline.Name = pipelineName
+	pipeline.Resources = &ppsclient.Resources{
+		Cpu:    0.314,
+		Memory: "159M",
+	}
+	_, err = c.PpsAPIClient.CreatePipeline(context.Background(), pipeline)
+	require.NoError(t, err)
+
+	// Get jobInfos from pachyderm so we can find the job pods with the k8s client
+	backoff.Retry(func() error {
+		jobInfos, err := c.ListJob(pipelineName, nil)
+		if err != nil {
+			return err
+		}
+		if len(jobInfos) < 1 {
+			return fmt.Errorf("no JobInfos yet")
+		} else if len(jobInfos) > 1 {
+			return fmt.Errorf("too many JobInfos")
+		} else {
+			jobInfo = jobInfos[0]
+			return nil
+		}
+	}, b)
+
+	// Get info about the job pods from k8s & check for resource values we set in
+	// the pipeline spec
+	podList, err = kubeClient.Pods(api.NamespaceDefault).List(api.ListOptions{
+		LabelSelector: labels.SelectorFromSet(
+			map[string]string{"app": jobInfo.Job.ID}),
+	})
+	require.NoError(t, err)
+	for _, p := range podList.Items {
+		for _, container := range p.Spec.Containers {
+			// Make sure a CPU and Memory request are both set
+			cpu, ok := container.Resources.Requests[api.ResourceCPU]
+			require.True(t, ok)
+			require.Equal(t, "314m", cpu.String())
+			mem, ok := container.Resources.Requests[api.ResourceMemory]
+			require.True(t, ok)
+			require.Equal(t, "159M", mem.String())
+		}
+	}
 }
 
 func getPachClient(t testing.TB) *client.APIClient {
