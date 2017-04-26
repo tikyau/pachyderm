@@ -321,7 +321,7 @@ func isNetRetryable(err error) bool {
 func TestIsNotExist(c Client) error {
 	_, err := c.Reader(uuid.NewWithoutDashes(), 0, 0)
 	if !c.IsNotExist(err) {
-		return fmt.Errorf("storage is unable to discern NotExist errors, \"%s\" should count as NotExist", err.Error())
+		return fmt.Errorf("storage is unable to discern NotExist errors, \"%s\" should count as NotExist", err)
 	}
 	return nil
 }
