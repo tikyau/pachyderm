@@ -414,6 +414,20 @@ func TestPutFileIntoOpenCommit(t *testing.T) {
 	require.YesError(t, err)
 }
 
+func TestPutFileEmtpyPathError(t *testing.T) {
+	t.Parallel()
+	client := getClient(t)
+
+	repo := uniqueString("TestPutFileEmtpyPathError")
+	require.NoError(t, client.CreateRepo(repo))
+
+	commit1, err := client.StartCommit(repo, "master")
+	require.NoError(t, err)
+	_, err = client.PutFile(repo, commit1.ID, "", strings.NewReader("foo\n"))
+	require.YesError(t, err)
+	require.Matches(t, "empty", err.Error())
+}
+
 func TestCreateInvalidBranchName(t *testing.T) {
 	t.Parallel()
 	client := getClient(t)

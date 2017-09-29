@@ -279,7 +279,11 @@ func (a *apiServer) PutFile(putFileServer pfs.API_PutFileServer) (retErr error) 
 	}(time.Now())
 	// not cleaning the path can result in weird effects like files called
 	// ./foo which won't display correctly when the filesystem is mounted
-	request.File.Path = path.Clean(request.File.Path)
+	cleanPath := path.Clean(request.File.Path)
+	if cleanPath == "." {
+		return fmt.Errorf("PutFile path \"%s\" is empty after cleaning", request.File.Path)
+	}
+	request.File.Path = cleanPath
 	var r io.Reader
 	if request.Url != "" {
 		url, err := url.Parse(request.Url)
